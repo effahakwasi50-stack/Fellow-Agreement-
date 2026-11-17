@@ -1,5 +1,6 @@
 import base64
 import csv
+import inspect
 import io
 import os
 import re
@@ -13,7 +14,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 from fpdf import FPDF
-from PIL import Image
+from PIL import Image, ImageDraw
 from streamlit_drawable_canvas import st_canvas
 
 # ==============================================================================
@@ -306,32 +307,112 @@ def to_latin1_safe(text: str) -> str:
     return text.encode("latin-1", errors="replace").decode("latin-1")
 
 
-def extract_signature_png(canvas_result) -> Optional[bytes]:
-    if canvas_result is None or canvas_result.image_data is None:
+def _rasterize_fabric_paths(json_objects: list, width: int = 620, height: int = 190) -> Optional[bytes]:
+    if not json_objects:
         return None
+    img = Image.new("RGB", (width, height), (255, 255, 255))
+    draw = ImageDraw.Draw(img)
+    drew_any = False
+
+    for obj in json_objects:
+        if not isinstance(obj, dict):
+            continue
+        path_cmds = obj.get("path")
+        if not isinstance(path_cmds, list):
+            continue
+        stroke_w = max(int(round(float(obj.get("strokeWidth", 3)))), 2)
+        stroke_color = (11, 31, 58)
+        cur_x, cur_y = 0.0, 0.0
+        points: List[Tuple[float, float]] = []
+
+        for cmd in path_cmds:
+            if not isinstance(cmd, (list, tuple)) or not cmd:
+                continue
+            op = cmd[0]
+            if op == "M" and len(cmd) >= 3:
+                if len(points) >= 2:
+                    draw.line(points, fill=stroke_color, width=stroke_w, joint="curve")
+                    drew_any = True
+                cur_x, cur_y = float(cmd[1]), float(cmd[2])
+                points = [(cur_x, cur_y)]
+            elif op == "L" and len(cmd) >= 3:
+                cur_x, cur_y = float(cmd[1]), float(cmd[2])
+                points.append((cur_x, cur_y))
+            elif op == "Q" and len(cmd) >= 5:
+                cx, cy, ex, ey = float(cmd[1]), float(cmd[2]), float(cmd[3]), float(cmd[4])
+                for step in range(1, 9):
+                    t = step / 8.0
+                    px = (1 - t) ** 2 * cur_x + 2 * (1 - t) * t * cx + t ** 2 * ex
+                    py = (1 - t) ** 2 * cur_y + 2 * (1 - t) * t * cy + t ** 2 * ey
+                    points.append((px, py))
+                cur_x, cur_y = ex, ey
+
+        if len(points) >= 2:
+            draw.line(points, fill=stroke_color, width=stroke_w, joint="curve")
+            drew_any = True
+        elif len(points) == 1:
+            px, py = points[0]
+            r = max(stroke_w / 2.0, 1.5)
+            draw.ellipse((px - r, py - r, px + r, py + r), fill=stroke_color)
+            drew_any = True
+
+    if not drew_any:
+        return None
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def extract_signature_png(canvas_result) -> Optional[bytes]:
+    if canvas_result is None:
+        return None
+
     json_objects = []
     if getattr(canvas_result, "json_data", None):
         json_objects = canvas_result.json_data.get("objects", []) or []
 
-    rgba = np.asarray(canvas_result.image_data, dtype=np.uint8)
-    # Check if user actually drew strokes (alpha channel > 0 or non-white RGB)
-    has_alpha_ink = bool(np.any(rgba[:, :, 3] > 0))
-    if not json_objects and not has_alpha_ink:
-        return None
+    image_data = None
+    try:
+        image_data = canvas_result.image_data
+    except Exception:
+        image_data = None
 
-    # Composite onto crisp white background for clean PDF and preview rendering
-    img = Image.fromarray(rgba, mode="RGBA")
-    white_bg = Image.new("RGBA", img.size, (255, 255, 255, 255))
-    composited = Image.alpha_composite(white_bg, img).convert("RGB")
+    if image_data is not None:
+        rgba = np.asarray(image_data, dtype=np.uint8)
+        if rgba.ndim == 3 and rgba.shape[2] == 4:
+            has_alpha_ink = bool(np.any(rgba[:, :, 3] > 0))
+            if not json_objects and not has_alpha_ink:
+                return None
+            img = Image.fromarray(rgba, mode="RGBA")
+            white_bg = Image.new("RGBA", img.size, (255, 255, 255, 255))
+            composited = Image.alpha_composite(white_bg, img).convert("RGB")
+        elif rgba.ndim == 3 and rgba.shape[2] == 3:
+            composited = Image.fromarray(rgba, mode="RGB")
+        else:
+            composited = None
 
-    # Confirm canvas is not purely blank white
-    arr = np.asarray(composited)
-    if np.all(arr >= 250):
-        return None
+        if composited is not None:
+            arr = np.asarray(composited)
+            if not np.all(arr >= 250):
+                buf = io.BytesIO()
+                composited.save(buf, format="PNG")
+                return buf.getvalue()
 
-    buf = io.BytesIO()
-    composited.save(buf, format="PNG")
-    return buf.getvalue()
+    try:
+        raw_bytes = getattr(canvas_result, "image_bytes", None)
+        if raw_bytes:
+            with Image.open(io.BytesIO(raw_bytes)) as raw_img:
+                rgba_img = raw_img.convert("RGBA")
+                white_bg = Image.new("RGBA", rgba_img.size, (255, 255, 255, 255))
+                composited = Image.alpha_composite(white_bg, rgba_img).convert("RGB")
+                if not np.all(np.asarray(composited) >= 250):
+                    buf = io.BytesIO()
+                    composited.save(buf, format="PNG")
+                    return buf.getvalue()
+    except Exception:
+        pass
+
+    return _rasterize_fabric_paths(json_objects)
 
 
 def generate_official_pdf(
@@ -766,16 +847,19 @@ with tab_verify:
 
         col_canvas, col_actions = st.columns([4, 1])
         with col_canvas:
-            canvas_result = st_canvas(
-                fill_color="rgba(255, 255, 255, 0)",
-                stroke_width=3,
-                stroke_color="#0B1F3A",
-                background_color="#FFFFFF",
-                height=190,
-                width=620,
-                drawing_mode="freedraw",
-                key=f"signature_canvas_{st.session_state.canvas_reset_key}",
-            )
+            canvas_kwargs = {
+                "fill_color": "rgba(255, 255, 255, 0)",
+                "stroke_width": 3,
+                "stroke_color": "#0B1F3A",
+                "background_color": "#FFFFFF",
+                "height": 190,
+                "width": 620,
+                "drawing_mode": "freedraw",
+                "key": f"signature_canvas_{st.session_state.canvas_reset_key}",
+            }
+            if "return_image_data" in inspect.signature(st_canvas).parameters:
+                canvas_kwargs["return_image_data"] = True
+            canvas_result = st_canvas(**canvas_kwargs)
         with col_actions:
             if st.button("Clear / Reset Signature", use_container_width=True):
                 st.session_state.canvas_reset_key += 1
