@@ -1,0 +1,6 @@
+{
+  "name": "Republic Hall — Fellow Verification Portal",
+  "description": "Official Republic Hall Fellow verification portal for confirming Fellow records, capturing electronic signatures, generating signed PDF receipts, and submitting to the Hall Tutor via WhatsApp.",
+  "requestFramePermissions": [],
+  "majorCapabilities": []
+}
