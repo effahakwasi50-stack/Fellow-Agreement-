@@ -21,7 +21,7 @@ from streamlit_drawable_canvas import st_canvas
 # Configuration Constants
 # ==============================================================================
 HALL_TUTOR_WHATSAPP = "233506759271"
-ADMIN_PIN = "1234"
+ADMIN_PIN = os.environ.get("ADMIN_PIN", "1234")
 DB_PATH = "republic_hall_records.db"
 LOGO_CANDIDATES = [
     "public/assets/aistudio/logo.jpg_982440ba.png",
@@ -273,6 +273,12 @@ def save_submission(full_name: str, staff_id: str, signature_png: bytes, timesta
         return int(cur.lastrowid)
 
 
+def delete_submission(record_id: int) -> None:
+    with get_connection() as conn:
+        conn.execute("DELETE FROM submissions WHERE id = ?", (record_id,))
+        conn.commit()
+
+
 def fetch_submissions() -> List[dict]:
     with get_connection() as conn:
         rows = conn.execute(
@@ -294,6 +300,7 @@ def sanitize_filename_part(value: str) -> str:
 
 
 def to_latin1_safe(text: str) -> str:
+    """fpdf's built-in fonts only support Latin-1, so swap/replace anything else."""
     replacements = {
         "\u2018": "'",
         "\u2019": "'",
@@ -301,7 +308,11 @@ def to_latin1_safe(text: str) -> str:
         "\u201d": '"',
         "\u2013": "-",
         "\u2014": "-",
+        "\u2022": "-",
+        "\u00b7": "-",
+        "\u2026": "...",
     }
+    text = str(text)
     for src, dst in replacements.items():
         text = text.replace(src, dst)
     return text.encode("latin-1", errors="replace").decode("latin-1")
@@ -379,17 +390,16 @@ def extract_signature_png(canvas_result) -> Optional[bytes]:
 
     if image_data is not None:
         rgba = np.asarray(image_data, dtype=np.uint8)
+        composited = None
         if rgba.ndim == 3 and rgba.shape[2] == 4:
             has_alpha_ink = bool(np.any(rgba[:, :, 3] > 0))
             if not json_objects and not has_alpha_ink:
                 return None
-            img = Image.fromarray(rgba, mode="RGBA")
+            img = Image.fromarray(rgba)
             white_bg = Image.new("RGBA", img.size, (255, 255, 255, 255))
             composited = Image.alpha_composite(white_bg, img).convert("RGB")
         elif rgba.ndim == 3 and rgba.shape[2] == 3:
-            composited = Image.fromarray(rgba, mode="RGB")
-        else:
-            composited = None
+            composited = Image.fromarray(rgba)
 
         if composited is not None:
             arr = np.asarray(composited)
@@ -441,9 +451,12 @@ def generate_official_pdf(
 
     logo_path = next((p for p in LOGO_CANDIDATES if os.path.exists(p)), None)
     if logo_path:
-        pdf.set_fill_color(255, 255, 255)
-        pdf.ellipse(19, 20, 24, 24, style="F")
-        pdf.image(logo_path, x=19, y=20, w=24, h=24)
+        try:
+            pdf.set_fill_color(255, 255, 255)
+            pdf.ellipse(19, 20, 24, 24, style="F")
+            pdf.image(logo_path, x=19, y=20, w=24, h=24)
+        except Exception:
+            logo_path = None
 
     text_x = 46 if logo_path else 18
     text_w = 146 if logo_path else 174
@@ -509,7 +522,14 @@ def generate_official_pdf(
         pdf.set_text_color(71, 85, 105)
         pdf.cell(54, 9, label, align="L")
 
-        pdf.set_font("Helvetica", "B", 11)
+        # Shrink long values so they stay inside the box
+        if len(value) <= 34:
+            value_size = 11
+        elif len(value) <= 44:
+            value_size = 9
+        else:
+            value_size = 7.5
+        pdf.set_font("Helvetica", "B", value_size)
         pdf.set_text_color(11, 31, 58)
         pdf.cell(100, 9, value, align="L")
         y += 12
@@ -559,14 +579,16 @@ def generate_official_pdf(
     pdf.multi_cell(
         166,
         5,
-        "Submission Notice: Please submit this signed PDF receipt directly to the Hall Tutor via WhatsApp (+233 50 675 9271) for official filing.",
+        "Submission Notice: Please submit this signed PDF receipt directly to the Hall Tutor "
+        "via WhatsApp (+233 50 675 9271) for official filing.",
         align="C",
     )
 
     pdf.set_xy(22, 270)
     pdf.set_font("Helvetica", "B", 8)
     pdf.set_text_color(155, 120, 22)
-    pdf.cell(166, 5, "REPUBLIC HALL  •  FELLOWS AGREEMENT REGISTRY", align="C")
+    # NOTE: plain "|" instead of the bullet character, which Helvetica cannot encode
+    pdf.cell(166, 5, "REPUBLIC HALL  |  FELLOWS AGREEMENT REGISTRY", align="C")
 
     raw_out = pdf.output()
     return bytes(raw_out)
@@ -574,7 +596,7 @@ def generate_official_pdf(
 
 def build_whatsapp_url(full_name: str, staff_id: str) -> str:
     message = (
-        "Hello Hall Tutor, I have completed my agreement form. "
+        "Hello Hall Tutor, I have completed my verification form. "
         "Please find attached my signed PDF document. "
         f"Fellow Name: {full_name} | Staff ID: {staff_id}"
     )
@@ -611,7 +633,7 @@ def build_backup_zip(records: List[dict]) -> bytes:
 # Streamlit Page Setup & Styling
 # ==============================================================================
 st.set_page_config(
-    page_title="Republic Hall — Fellow Agreement Portal",
+    page_title="Republic Hall - Fellow Agreement Portal",
     page_icon="🏛️",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -878,13 +900,20 @@ with tab_verify:
                 now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 clean_staff_id = staff_id.strip()
                 record_id = save_submission(selected_fellow, clean_staff_id, sig_png, now_str)
-                pdf_bytes = generate_official_pdf(
-                    full_name=selected_fellow,
-                    staff_id=clean_staff_id,
-                    timestamp_str=now_str,
-                    signature_png=sig_png,
-                    record_id=record_id,
-                )
+                try:
+                    pdf_bytes = generate_official_pdf(
+                        full_name=selected_fellow,
+                        staff_id=clean_staff_id,
+                        timestamp_str=now_str,
+                        signature_png=sig_png,
+                        record_id=record_id,
+                    )
+                except Exception as exc:
+                    # Roll back so a failed PDF never leaves a half-finished record
+                    delete_submission(record_id)
+                    st.error(f"Could not generate the PDF, so nothing was saved. Please try again. ({exc})")
+                    st.stop()
+
                 pdf_filename = (
                     f"Republic_Hall_{sanitize_filename_part(clean_staff_id)}_"
                     f"{sanitize_filename_part(selected_fellow)}.pdf"
@@ -906,7 +935,7 @@ with tab_verify:
         st.markdown(
             f"""
             <div class="rh-completion-box">
-                <h3 style="margin-top:0; color:#0B1F3A;">Agreement Complete — Next Steps</h3>
+                <h3 style="margin-top:0; color:#0B1F3A;">Agreement Complete - Next Steps</h3>
                 <p style="margin-bottom:1rem; color:#334155;">
                     <strong>Fellow:</strong> {sub['full_name']} &nbsp;|&nbsp;
                     <strong>Staff ID:</strong> {sub['staff_id']} &nbsp;|&nbsp;
