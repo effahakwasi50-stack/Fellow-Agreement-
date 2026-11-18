@@ -1,5 +1,6 @@
 import base64
 import csv
+import html
 import inspect
 import io
 import os
@@ -8,19 +9,16 @@ import sqlite3
 import zipfile
 from datetime import datetime
 from typing import List, Optional, Tuple
-from urllib.parse import quote
 
 import numpy as np
 import pandas as pd
 import streamlit as st
-from fpdf import FPDF
 from PIL import Image, ImageDraw
 from streamlit_drawable_canvas import st_canvas
 
 # ==============================================================================
 # Configuration Constants
 # ==============================================================================
-HALL_TUTOR_WHATSAPP = "233506759271"
 ADMIN_PIN = os.environ.get("ADMIN_PIN", "1234")
 DB_PATH = "republic_hall_records.db"
 LOGO_CANDIDATES = [
@@ -279,6 +277,23 @@ def delete_submission(record_id: int) -> None:
         conn.commit()
 
 
+def reset_submissions() -> None:
+    """Delete every registration and restart numbering from 1."""
+    with get_connection() as conn:
+        conn.execute("DELETE FROM submissions")
+        conn.execute("DELETE FROM sqlite_sequence WHERE name = 'submissions'")
+        conn.commit()
+
+
+def fetch_registered_list() -> List[dict]:
+    """Public list: name + time only (no Staff ID, no signature)."""
+    with get_connection() as conn:
+        rows = conn.execute(
+            "SELECT id, full_name, timestamp FROM submissions ORDER BY id ASC"
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
 def fetch_submissions() -> List[dict]:
     with get_connection() as conn:
         rows = conn.execute(
@@ -292,30 +307,11 @@ def fetch_submissions() -> List[dict]:
 
 
 # ==============================================================================
-# Signature & PDF Generation Helpers
+# Signature & Export Helpers
 # ==============================================================================
 def sanitize_filename_part(value: str) -> str:
     cleaned = re.sub(r"[^A-Za-z0-9_-]+", "_", value.strip())
     return cleaned.strip("_") or "Record"
-
-
-def to_latin1_safe(text: str) -> str:
-    """fpdf's built-in fonts only support Latin-1, so swap/replace anything else."""
-    replacements = {
-        "\u2018": "'",
-        "\u2019": "'",
-        "\u201c": '"',
-        "\u201d": '"',
-        "\u2013": "-",
-        "\u2014": "-",
-        "\u2022": "-",
-        "\u00b7": "-",
-        "\u2026": "...",
-    }
-    text = str(text)
-    for src, dst in replacements.items():
-        text = text.replace(src, dst)
-    return text.encode("latin-1", errors="replace").decode("latin-1")
 
 
 def _rasterize_fabric_paths(json_objects: list, width: int = 620, height: int = 190) -> Optional[bytes]:
@@ -425,184 +421,6 @@ def extract_signature_png(canvas_result) -> Optional[bytes]:
     return _rasterize_fabric_paths(json_objects)
 
 
-def generate_official_pdf(
-    full_name: str,
-    staff_id: str,
-    timestamp_str: str,
-    signature_png: bytes,
-    record_id: int,
-) -> bytes:
-    pdf = FPDF(orientation="P", unit="mm", format="A4")
-    pdf.set_auto_page_break(auto=False)
-    pdf.add_page()
-
-    # Outer Republic Hall Navy Border & Inner Gold Border
-    pdf.set_draw_color(11, 31, 58)  # Deep Navy #0B1F3A
-    pdf.set_line_width(1.2)
-    pdf.rect(10, 10, 190, 277)
-
-    pdf.set_draw_color(197, 155, 39)  # Republic Hall Gold #C59B27
-    pdf.set_line_width(0.5)
-    pdf.rect(13, 13, 184, 271)
-
-    # Top Navy Header Banner
-    pdf.set_fill_color(11, 31, 58)
-    pdf.rect(13, 13, 184, 38, style="F")
-
-    logo_path = next((p for p in LOGO_CANDIDATES if os.path.exists(p)), None)
-    if logo_path:
-        try:
-            pdf.set_fill_color(255, 255, 255)
-            pdf.ellipse(19, 20, 24, 24, style="F")
-            pdf.image(logo_path, x=19, y=20, w=24, h=24)
-        except Exception:
-            logo_path = None
-
-    text_x = 46 if logo_path else 18
-    text_w = 146 if logo_path else 174
-
-    pdf.set_text_color(212, 175, 55)  # Gold
-    pdf.set_font("Helvetica", "B", 10)
-    pdf.set_xy(text_x, 19)
-    pdf.cell(text_w, 6, "OFFICIAL FELLOW AGREEMENT RECORD", align="C")
-
-    pdf.set_text_color(255, 255, 255)
-    pdf.set_font("Helvetica", "B", 22)
-    pdf.set_xy(text_x, 26)
-    pdf.cell(text_w, 10, "REPUBLIC HALL", align="C")
-
-    pdf.set_text_color(226, 232, 240)
-    pdf.set_font("Helvetica", "", 10)
-    pdf.set_xy(text_x, 38)
-    pdf.cell(text_w, 6, "Office of the Hall Tutor  |  Fellows Directory & Electronic Attestation", align="C")
-
-    # Gold Accent Rule
-    pdf.set_fill_color(197, 155, 39)
-    pdf.rect(13, 51, 184, 1.5, style="F")
-
-    # Document Reference Strip
-    pdf.set_text_color(82, 96, 113)
-    pdf.set_font("Helvetica", "B", 9)
-    pdf.set_xy(22, 60)
-    pdf.cell(80, 6, f"DOCUMENT REF: RH-AGR-{record_id:05d}", align="L")
-    pdf.set_xy(108, 60)
-    pdf.cell(80, 6, f"ISSUED: {to_latin1_safe(timestamp_str)}", align="R")
-
-    # Introductory Attestation Copy
-    pdf.set_text_color(30, 41, 59)
-    pdf.set_font("Helvetica", "", 11)
-    pdf.set_xy(22, 74)
-    pdf.multi_cell(
-        166,
-        6,
-        to_latin1_safe(
-            "This official agreement receipt certifies that the Fellow named below has "
-            "confirmed their institutional profile and affixed their electronic signature to "
-            "the Republic Hall Fellows Agreement."
-        ),
-    )
-
-    # Details Table Box
-    box_top = 96
-    pdf.set_fill_color(249, 248, 244)
-    pdf.set_draw_color(203, 213, 225)
-    pdf.set_line_width(0.4)
-    pdf.rect(22, box_top, 166, 56, style="FD")
-
-    rows = [
-        ("Fellow Full Name", to_latin1_safe(full_name)),
-        ("Staff ID Number", to_latin1_safe(staff_id)),
-        ("Date & Time of Signing", to_latin1_safe(timestamp_str)),
-        ("Agreement Status", "Confirmed & Electronically Signed"),
-    ]
-    y = box_top + 6
-    for label, value in rows:
-        pdf.set_xy(28, y)
-        pdf.set_font("Helvetica", "B", 10)
-        pdf.set_text_color(71, 85, 105)
-        pdf.cell(54, 9, label, align="L")
-
-        # Shrink long values so they stay inside the box
-        if len(value) <= 34:
-            value_size = 11
-        elif len(value) <= 44:
-            value_size = 9
-        else:
-            value_size = 7.5
-        pdf.set_font("Helvetica", "B", value_size)
-        pdf.set_text_color(11, 31, 58)
-        pdf.cell(100, 9, value, align="L")
-        y += 12
-
-    # Dedicated Signature Box
-    sig_box_top = 166
-    pdf.set_text_color(11, 31, 58)
-    pdf.set_font("Helvetica", "B", 11)
-    pdf.set_xy(22, sig_box_top)
-    pdf.cell(166, 7, "FELLOW ELECTRONIC SIGNATURE", align="L")
-
-    pdf.set_draw_color(11, 31, 58)
-    pdf.set_line_width(0.5)
-    pdf.set_fill_color(255, 255, 255)
-    pdf.rect(22, sig_box_top + 9, 166, 62, style="FD")
-
-    # Embed signature PNG centered inside the signature box
-    sig_stream = io.BytesIO(signature_png)
-    with Image.open(sig_stream) as sig_img:
-        w_px, h_px = sig_img.size
-    max_w_mm = 130.0
-    max_h_mm = 46.0
-    aspect = w_px / max(h_px, 1)
-    draw_w = max_w_mm
-    draw_h = draw_w / aspect
-    if draw_h > max_h_mm:
-        draw_h = max_h_mm
-        draw_w = draw_h * aspect
-    img_x = 22 + (166 - draw_w) / 2
-    img_y = sig_box_top + 14 + (46 - draw_h) / 2
-
-    sig_stream.seek(0)
-    pdf.image(sig_stream, x=img_x, y=img_y, w=draw_w, h=draw_h)
-
-    # Signature Baseline Caption
-    pdf.set_draw_color(197, 155, 39)
-    pdf.line(42, sig_box_top + 63, 168, sig_box_top + 63)
-    pdf.set_font("Helvetica", "", 8.5)
-    pdf.set_text_color(100, 116, 139)
-    pdf.set_xy(22, sig_box_top + 64)
-    pdf.cell(166, 5, to_latin1_safe(f"Signed electronically by {full_name} ({staff_id})"), align="C")
-
-    # Footer Handoff Instruction
-    pdf.set_xy(22, 252)
-    pdf.set_font("Helvetica", "", 9)
-    pdf.set_text_color(71, 85, 105)
-    pdf.multi_cell(
-        166,
-        5,
-        "Submission Notice: Please submit this signed PDF receipt directly to the Hall Tutor "
-        "via WhatsApp (+233 50 675 9271) for official filing.",
-        align="C",
-    )
-
-    pdf.set_xy(22, 270)
-    pdf.set_font("Helvetica", "B", 8)
-    pdf.set_text_color(155, 120, 22)
-    # NOTE: plain "|" instead of the bullet character, which Helvetica cannot encode
-    pdf.cell(166, 5, "REPUBLIC HALL  |  FELLOWS AGREEMENT REGISTRY", align="C")
-
-    raw_out = pdf.output()
-    return bytes(raw_out)
-
-
-def build_whatsapp_url(full_name: str, staff_id: str) -> str:
-    message = (
-        "Hello Hall Tutor, I have completed my verification form. "
-        "Please find attached my signed PDF document. "
-        f"Fellow Name: {full_name} | Staff ID: {staff_id}"
-    )
-    return f"https://wa.me/{HALL_TUTOR_WHATSAPP}?text={quote(message)}"
-
-
 def build_backup_zip(records: List[dict]) -> bytes:
     zip_buf = io.BytesIO()
     df_rows = []
@@ -675,38 +493,37 @@ st.markdown(
             margin-top: 0.35rem;
             margin-bottom: 0;
         }
-        .rh-step-card {
+        .rh-done-box {
             background: #FFFFFF;
-            border: 1px solid #E2E8F0;
-            border-radius: 10px;
-            padding: 1.25rem 1.5rem;
-            margin-bottom: 1rem;
+            border: 2px solid #22C55E;
+            border-radius: 14px;
+            padding: 2.5rem 1.5rem;
+            margin: 1.25rem 0;
+            text-align: center;
         }
-        .rh-completion-box {
-            background: #FFFFFF;
-            border: 2px solid #C59B27;
-            border-radius: 12px;
-            padding: 1.5rem;
-            margin-top: 1.25rem;
-        }
-        .whatsapp-btn {
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
-            width: 100%;
-            background-color: #25D366;
-            color: #FFFFFF !important;
+        .rh-tick {
+            width: 150px;
+            height: 150px;
+            line-height: 150px;
+            margin: 0 auto 1.25rem auto;
+            border-radius: 50%;
+            background: #22C55E;
+            color: #FFFFFF;
+            font-size: 5.5rem;
             font-weight: 700;
-            font-size: 1rem;
-            padding: 0.75rem 1.25rem;
-            border-radius: 8px;
-            text-decoration: none !important;
-            border: 1px solid #1EBE5D;
-            transition: background-color 0.15s ease;
+            box-shadow: 0 8px 24px rgba(34, 197, 94, 0.35);
         }
-        .whatsapp-btn:hover {
-            background-color: #128C7E;
-            color: #FFFFFF !important;
+        .rh-done-title {
+            color: #15803D;
+            font-size: 2rem;
+            font-weight: 800;
+            margin: 0;
+        }
+        .rh-done-name {
+            color: #334155;
+            font-size: 1.05rem;
+            margin-top: 0.5rem;
+            margin-bottom: 0;
         }
         div[data-testid="stDownloadButton"] > button {
             background-color: #0B1F3A;
@@ -737,8 +554,25 @@ if "last_submission" not in st.session_state:
     st.session_state.last_submission = None
 if "sidebar_admin_unlocked" not in st.session_state:
     st.session_state.sidebar_admin_unlocked = False
-if "records_admin_unlocked" not in st.session_state:
-    st.session_state.records_admin_unlocked = False
+
+
+def start_new_agreement() -> None:
+    """Callback: clear the finished screen and the form fields for the next Fellow."""
+    st.session_state.last_submission = None
+    st.session_state.canvas_reset_key += 1
+    st.session_state.pop("fellow_select", None)
+    st.session_state.pop("staff_id_input", None)
+
+
+def reset_all_registrations() -> None:
+    """Callback for the admin reset button."""
+    if st.session_state.get("confirm_reset"):
+        reset_submissions()
+        st.session_state.last_submission = None
+        st.session_state.confirm_reset = False
+        st.session_state.reset_done = True
+    else:
+        st.session_state.reset_blocked = True
 
 
 # ==============================================================================
@@ -803,6 +637,47 @@ with st.sidebar:
                     st.success(f"Directory updated ({inserted} added).")
                     st.rerun()
 
+            st.divider()
+            st.markdown("#### Full Backup (Admin Only)")
+            admin_records = fetch_submissions()
+            st.caption(f"Registrations stored: **{len(admin_records)}**")
+            if admin_records:
+                admin_df = pd.DataFrame(
+                    [
+                        {
+                            "ID": r["id"],
+                            "Full Name": r["full_name"],
+                            "Staff ID": r["staff_id"],
+                            "Timestamp": r["timestamp"],
+                        }
+                        for r in admin_records
+                    ]
+                )
+                st.download_button(
+                    label="Export Full Records (CSV)",
+                    data=admin_df.to_csv(index=False).encode("utf-8"),
+                    file_name="republic_hall_full_records.csv",
+                    mime="text/csv",
+                    use_container_width=True,
+                )
+                st.download_button(
+                    label="Export Backup (ZIP with Signatures)",
+                    data=build_backup_zip(admin_records),
+                    file_name="republic_hall_backup.zip",
+                    mime="application/zip",
+                    use_container_width=True,
+                )
+
+            st.divider()
+            st.markdown("#### Reset Registrations")
+            st.caption("Deletes every registration and signature so the list looks like no one has registered. The Fellows directory is not touched.")
+            st.checkbox("I understand this cannot be undone", key="confirm_reset")
+            st.button("Reset All Registrations", use_container_width=True, on_click=reset_all_registrations)
+            if st.session_state.pop("reset_done", False):
+                st.success("All registrations cleared.")
+            if st.session_state.pop("reset_blocked", False):
+                st.warning("Tick the confirmation box first.")
+
 
 # ==============================================================================
 # Header Banner
@@ -826,7 +701,7 @@ st.markdown(
             <div class="rh-kicker">Republic Hall • Office of the Hall Tutor</div>
             <h1 class="rh-title">Fellow Agreement & Electronic Signature Portal</h1>
             <p class="rh-subtitle">
-                Confirm your Fellow record, affix your electronic signature, download your official PDF agreement, and send it to the Hall Tutor.
+                Select your name, enter your Staff ID and sign to complete your Fellow agreement.
             </p>
         </div>
     </div>
@@ -834,205 +709,119 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-tab_verify, tab_admin = st.tabs(["Fellow Agreement", "Admin Records"])
+tab_verify, tab_list = st.tabs(["Fellow Agreement", "See Current List"])
 
 
 # ==============================================================================
-# Tab 1: Step-by-Step Verification Workflow
+# Tab 1: Step-by-Step Workflow
 # ==============================================================================
 with tab_verify:
-    fellow_names = [name for _, name in fellows_rows]
-
-    st.markdown("#### Step 1: Search & Select Fellow Name")
-    selected_fellow = st.selectbox(
-        "Fellow Full Name",
-        options=fellow_names,
-        index=None,
-        placeholder="Search Fellow Name",
-        label_visibility="collapsed",
-    )
-
-    staff_id = ""
-    canvas_result = None
-
-    if selected_fellow:
-        st.markdown("#### Step 2: Staff ID Number")
-        staff_id = st.text_input(
-            "Staff ID Number",
-            placeholder="Enter your Staff ID Number (e.g. RH-4082)",
-            key="staff_id_input",
-        )
-
-    if selected_fellow and staff_id.strip():
-        st.markdown("#### Step 3: Electronic Signature Pad")
-        st.caption("Sign inside the white pad below using touch, mouse, or trackpad.")
-
-        col_canvas, col_actions = st.columns([4, 1])
-        with col_canvas:
-            canvas_kwargs = {
-                "fill_color": "rgba(255, 255, 255, 0)",
-                "stroke_width": 3,
-                "stroke_color": "#0B1F3A",
-                "background_color": "#FFFFFF",
-                "height": 190,
-                "width": 620,
-                "drawing_mode": "freedraw",
-                "key": f"signature_canvas_{st.session_state.canvas_reset_key}",
-            }
-            if "return_image_data" in inspect.signature(st_canvas).parameters:
-                canvas_kwargs["return_image_data"] = True
-            canvas_result = st_canvas(**canvas_kwargs)
-        with col_actions:
-            if st.button("Clear / Reset Signature", use_container_width=True):
-                st.session_state.canvas_reset_key += 1
-                st.rerun()
-
-        st.markdown("#### Step 4: Confirm & Generate Document")
-        if st.button("Confirm & Generate Signed PDF", type="primary", use_container_width=True):
-            sig_png = extract_signature_png(canvas_result)
-            if not selected_fellow:
-                st.error("Please select a Fellow name in Step 1.")
-            elif not staff_id.strip():
-                st.error("Please enter your Staff ID Number in Step 2.")
-            elif sig_png is None:
-                st.error("Please draw your signature on the signature pad before confirming.")
-            else:
-                now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                clean_staff_id = staff_id.strip()
-                record_id = save_submission(selected_fellow, clean_staff_id, sig_png, now_str)
-                try:
-                    pdf_bytes = generate_official_pdf(
-                        full_name=selected_fellow,
-                        staff_id=clean_staff_id,
-                        timestamp_str=now_str,
-                        signature_png=sig_png,
-                        record_id=record_id,
-                    )
-                except Exception as exc:
-                    # Roll back so a failed PDF never leaves a half-finished record
-                    delete_submission(record_id)
-                    st.error(f"Could not generate the PDF, so nothing was saved. Please try again. ({exc})")
-                    st.stop()
-
-                pdf_filename = (
-                    f"Republic_Hall_{sanitize_filename_part(clean_staff_id)}_"
-                    f"{sanitize_filename_part(selected_fellow)}.pdf"
-                )
-                st.session_state.last_submission = {
-                    "record_id": record_id,
-                    "full_name": selected_fellow,
-                    "staff_id": clean_staff_id,
-                    "timestamp": now_str,
-                    "pdf_bytes": pdf_bytes,
-                    "pdf_filename": pdf_filename,
-                    "whatsapp_url": build_whatsapp_url(selected_fellow, clean_staff_id),
-                }
-                st.success("Agreement recorded and official PDF receipt generated.")
-
-    # Post-Submission 2-Step Completion Box
     if st.session_state.last_submission:
+        # ---- Completed screen: big green tick only ----
         sub = st.session_state.last_submission
         st.markdown(
             f"""
-            <div class="rh-completion-box">
-                <h3 style="margin-top:0; color:#0B1F3A;">Agreement Complete - Next Steps</h3>
-                <p style="margin-bottom:1rem; color:#334155;">
-                    <strong>Fellow:</strong> {sub['full_name']} &nbsp;|&nbsp;
-                    <strong>Staff ID:</strong> {sub['staff_id']} &nbsp;|&nbsp;
-                    <strong>Signed:</strong> {sub['timestamp']}
-                </p>
+            <div class="rh-done-box">
+                <div class="rh-tick">&#10003;</div>
+                <p class="rh-done-title">Completed</p>
+                <p class="rh-done-name">{html.escape(sub['full_name'])}</p>
             </div>
             """,
             unsafe_allow_html=True,
         )
-        step_a_col, step_b_col = st.columns(2)
-        with step_a_col:
-            st.download_button(
-                label="1. Download Your Signed PDF",
-                data=sub["pdf_bytes"],
-                file_name=sub["pdf_filename"],
-                mime="application/pdf",
-                use_container_width=True,
-            )
-        with step_b_col:
-            st.markdown(
-                f"""
-                <a class="whatsapp-btn" href="{sub['whatsapp_url']}" target="_blank" rel="noopener noreferrer">
-                    2. Send via WhatsApp to Hall Tutor
-                </a>
-                """,
-                unsafe_allow_html=True,
-            )
-            st.info("Once WhatsApp opens with your pre-filled details, please attach the downloaded PDF document before pressing send.")
-
-        if st.button("Start New Agreement"):
-            st.session_state.last_submission = None
-            st.session_state.canvas_reset_key += 1
-            st.rerun()
-
-
-# ==============================================================================
-# Tab 2: PIN-Protected Admin Records
-# ==============================================================================
-with tab_admin:
-    st.markdown("### Admin Records & Backup Export")
-    if not st.session_state.records_admin_unlocked:
-        pin_attempt = st.text_input("Enter Admin PIN to view submissions", type="password", key="records_pin_input")
-        if st.button("Unlock Admin Records"):
-            if pin_attempt == ADMIN_PIN:
-                st.session_state.records_admin_unlocked = True
-                st.rerun()
-            else:
-                st.error("Invalid PIN. Please try again.")
+        st.button("Register Another Fellow", on_click=start_new_agreement)
     else:
-        col_top_a, col_top_b = st.columns([3, 1])
-        with col_top_b:
-            if st.button("Lock Admin Records", use_container_width=True):
-                st.session_state.records_admin_unlocked = False
-                st.rerun()
+        fellow_names = [name for _, name in fellows_rows]
 
-        records = fetch_submissions()
-        with col_top_a:
-            st.metric("Total Completed Agreements", len(records))
+        st.markdown("#### Step 1: Search & Select Fellow Name")
+        selected_fellow = st.selectbox(
+            "Fellow Full Name",
+            options=fellow_names,
+            index=None,
+            placeholder="Search Fellow Name",
+            label_visibility="collapsed",
+            key="fellow_select",
+        )
 
-        if not records:
-            st.info("No Fellow agreement submissions have been recorded yet.")
-        else:
-            export_df = pd.DataFrame(
-                [
-                    {
-                        "ID": r["id"],
-                        "Full Name": r["full_name"],
-                        "Staff ID": r["staff_id"],
-                        "Timestamp": r["timestamp"],
-                    }
-                    for r in records
-                ]
+        staff_id = ""
+        canvas_result = None
+
+        if selected_fellow:
+            st.markdown("#### Step 2: Staff ID Number")
+            staff_id = st.text_input(
+                "Staff ID Number",
+                placeholder="Enter your Staff ID Number (e.g. RH-4082)",
+                key="staff_id_input",
             )
-            exp_col1, exp_col2 = st.columns(2)
-            with exp_col1:
-                st.download_button(
-                    label="Export Records (CSV)",
-                    data=export_df.to_csv(index=False).encode("utf-8"),
-                    file_name="republic_hall_submissions.csv",
-                    mime="text/csv",
-                    use_container_width=True,
-                )
-            with exp_col2:
-                st.download_button(
-                    label="Export Full Backup (ZIP with Signatures)",
-                    data=build_backup_zip(records),
-                    file_name="republic_hall_backup.zip",
-                    mime="application/zip",
-                    use_container_width=True,
-                )
 
-            st.divider()
-            for r in records:
-                c1, c2 = st.columns([3, 2])
-                with c1:
-                    st.markdown(f"**{r['full_name']}**")
-                    st.caption(f"Staff ID: `{r['staff_id']}`  |  Signed: `{r['timestamp']}`  |  Record #{r['id']}")
-                with c2:
-                    st.image(r["signature_image"], caption="Electronic Signature", width=240)
-                st.divider()
+        if selected_fellow and staff_id.strip():
+            st.markdown("#### Step 3: Electronic Signature Pad")
+            st.caption("Sign inside the white pad below using touch, mouse, or trackpad.")
+
+            col_canvas, col_actions = st.columns([4, 1])
+            with col_canvas:
+                canvas_kwargs = {
+                    "fill_color": "rgba(255, 255, 255, 0)",
+                    "stroke_width": 3,
+                    "stroke_color": "#0B1F3A",
+                    "background_color": "#FFFFFF",
+                    "height": 190,
+                    "width": 620,
+                    "drawing_mode": "freedraw",
+                    "key": f"signature_canvas_{st.session_state.canvas_reset_key}",
+                }
+                if "return_image_data" in inspect.signature(st_canvas).parameters:
+                    canvas_kwargs["return_image_data"] = True
+                canvas_result = st_canvas(**canvas_kwargs)
+            with col_actions:
+                if st.button("Clear / Reset Signature", use_container_width=True):
+                    st.session_state.canvas_reset_key += 1
+                    st.rerun()
+
+            st.markdown("#### Step 4: Confirm")
+            if st.button("Confirm & Submit", type="primary", use_container_width=True):
+                sig_png = extract_signature_png(canvas_result)
+                if not selected_fellow:
+                    st.error("Please select a Fellow name in Step 1.")
+                elif not staff_id.strip():
+                    st.error("Please enter your Staff ID Number in Step 2.")
+                elif sig_png is None:
+                    st.error("Please draw your signature on the signature pad before confirming.")
+                else:
+                    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    record_id = save_submission(selected_fellow, staff_id.strip(), sig_png, now_str)
+                    st.session_state.last_submission = {
+                        "record_id": record_id,
+                        "full_name": selected_fellow,
+                    }
+                    st.rerun()
+
+
+# ==============================================================================
+# Tab 2: Public "See Current List" (no PIN)
+# ==============================================================================
+with tab_list:
+    st.markdown("### Current List")
+    registered = fetch_registered_list()
+    st.metric("Fellows who have completed the agreement", f"{len(registered)} of {len(fellows_rows)}")
+
+    list_df = pd.DataFrame(
+        [
+            {"No.": i, "Full Name": r["full_name"], "Date & Time Signed": r["timestamp"]}
+            for i, r in enumerate(registered, start=1)
+        ],
+        columns=["No.", "Full Name", "Date & Time Signed"],
+    )
+
+    if registered:
+        st.dataframe(list_df, hide_index=True)
+    else:
+        st.info("No one has registered yet.")
+
+    st.download_button(
+        label="Download List",
+        data=list_df.to_csv(index=False).encode("utf-8"),
+        file_name="republic_hall_current_list.csv",
+        mime="text/csv",
+        use_container_width=True,
+    )
