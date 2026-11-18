@@ -468,6 +468,23 @@ st.markdown(
         [data-testid="stSidebar"], [data-testid="stSidebarCollapsedControl"], [data-testid="collapsedControl"] {
             display: none !important;
         }
+        /* Hide the top-right toolbar (GitHub icon, Fork, Deploy, menu) */
+        [data-testid="stToolbar"],
+        [data-testid="stToolbarActions"],
+        [data-testid="stAppDeployButton"],
+        .stAppDeployButton,
+        [data-testid="stMainMenu"],
+        #MainMenu,
+        [data-testid="stDecoration"],
+        [data-testid="stStatusWidget"],
+        [class*="viewerBadge"],
+        footer {
+            display: none !important;
+            visibility: hidden !important;
+        }
+        header[data-testid="stHeader"] {
+            background: transparent !important;
+        }
         .rh-banner {
             background: linear-gradient(135deg, #0B1F3A 0%, #132B4C 100%);
             border-bottom: 3px solid #C59B27;
