@@ -588,7 +588,7 @@ st.markdown(
         {logo_html}
         <div>
             <div class="rh-kicker">Republic Hall • Office of the Hall Tutor</div>
-            <h1 class="rh-title">Fellow Agreement & Electronic Signature Portal</h1>
+            <h1 class="rh-title">Fellow Welfare</h1>
             <p class="rh-subtitle">
                 Select your name, enter your Staff ID and sign to complete your Fellow agreement.
             </p>
