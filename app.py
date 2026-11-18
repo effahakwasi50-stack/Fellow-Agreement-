@@ -454,7 +454,7 @@ st.set_page_config(
     page_title="Republic Hall - Fellow Agreement Portal",
     page_icon="🏛️",
     layout="wide",
-    initial_sidebar_state="expanded",
+    initial_sidebar_state="collapsed",
 )
 
 init_db()
@@ -464,6 +464,9 @@ st.markdown(
     <style>
         .stApp {
             background-color: #F9F8F4;
+        }
+        [data-testid="stSidebar"], [data-testid="stSidebarCollapsedControl"], [data-testid="collapsedControl"] {
+            display: none !important;
         }
         .rh-banner {
             background: linear-gradient(135deg, #0B1F3A 0%, #132B4C 100%);
@@ -552,8 +555,6 @@ if "canvas_reset_key" not in st.session_state:
     st.session_state.canvas_reset_key = 0
 if "last_submission" not in st.session_state:
     st.session_state.last_submission = None
-if "sidebar_admin_unlocked" not in st.session_state:
-    st.session_state.sidebar_admin_unlocked = False
 
 
 def start_new_agreement() -> None:
@@ -564,119 +565,7 @@ def start_new_agreement() -> None:
     st.session_state.pop("staff_id_input", None)
 
 
-def reset_all_registrations() -> None:
-    """Callback for the admin reset button."""
-    if st.session_state.get("confirm_reset"):
-        reset_submissions()
-        st.session_state.last_submission = None
-        st.session_state.confirm_reset = False
-        st.session_state.reset_done = True
-    else:
-        st.session_state.reset_blocked = True
-
-
-# ==============================================================================
-# Sidebar: PIN-Protected Admin / Manage Fellows
-# ==============================================================================
-with st.sidebar:
-    st.markdown("### Republic Hall Registry")
-    fellows_rows = fetch_fellows()
-    st.caption(f"Fellows in directory: **{len(fellows_rows)}**")
-    st.divider()
-
-    with st.expander("Admin / Manage Fellows", expanded=st.session_state.sidebar_admin_unlocked):
-        if not st.session_state.sidebar_admin_unlocked:
-            pin_input = st.text_input("Admin PIN", type="password", key="sidebar_pin_input")
-            if st.button("Unlock Fellows Manager", use_container_width=True):
-                if pin_input == ADMIN_PIN:
-                    st.session_state.sidebar_admin_unlocked = True
-                    st.rerun()
-                else:
-                    st.error("Incorrect PIN.")
-        else:
-            if st.button("Lock Fellows Manager", use_container_width=True):
-                st.session_state.sidebar_admin_unlocked = False
-                st.rerun()
-
-            st.markdown("#### Add Fellow")
-            new_fellow_name = st.text_input("Full Name", placeholder="e.g. Dr. Kwame Mensah", key="add_fellow_input")
-            if st.button("Add Name to Directory", use_container_width=True):
-                if add_fellow(new_fellow_name):
-                    st.success(f"Added: {new_fellow_name.strip()}")
-                    st.rerun()
-                else:
-                    st.warning("Enter a unique, non-empty Fellow name.")
-
-            st.markdown("#### Remove Fellow")
-            if fellows_rows:
-                remove_choice = st.selectbox(
-                    "Select Fellow to Remove",
-                    options=fellows_rows,
-                    format_func=lambda item: item[1],
-                    index=None,
-                    placeholder="Choose Fellow to remove",
-                    key="remove_fellow_select",
-                )
-                if st.button("Remove Selected Fellow", use_container_width=True) and remove_choice:
-                    remove_fellow(remove_choice[0])
-                    st.success(f"Removed: {remove_choice[1]}")
-                    st.rerun()
-
-            st.markdown("#### Upload .csv / .txt List")
-            uploaded_file = st.file_uploader(
-                "Upload Fellows File",
-                type=["csv", "txt"],
-                key="fellows_upload",
-            )
-            replace_mode = st.checkbox("Replace existing directory", value=False)
-            if uploaded_file is not None:
-                parsed_names = parse_uploaded_fellows(uploaded_file.getvalue(), uploaded_file.name)
-                st.caption(f"Detected {len(parsed_names)} name(s) in `{uploaded_file.name}`.")
-                if st.button("Apply Uploaded Directory", use_container_width=True):
-                    inserted = update_fellows_from_list(parsed_names, replace_existing=replace_mode)
-                    st.success(f"Directory updated ({inserted} added).")
-                    st.rerun()
-
-            st.divider()
-            st.markdown("#### Full Backup (Admin Only)")
-            admin_records = fetch_submissions()
-            st.caption(f"Registrations stored: **{len(admin_records)}**")
-            if admin_records:
-                admin_df = pd.DataFrame(
-                    [
-                        {
-                            "ID": r["id"],
-                            "Full Name": r["full_name"],
-                            "Staff ID": r["staff_id"],
-                            "Timestamp": r["timestamp"],
-                        }
-                        for r in admin_records
-                    ]
-                )
-                st.download_button(
-                    label="Export Full Records (CSV)",
-                    data=admin_df.to_csv(index=False).encode("utf-8"),
-                    file_name="republic_hall_full_records.csv",
-                    mime="text/csv",
-                    use_container_width=True,
-                )
-                st.download_button(
-                    label="Export Backup (ZIP with Signatures)",
-                    data=build_backup_zip(admin_records),
-                    file_name="republic_hall_backup.zip",
-                    mime="application/zip",
-                    use_container_width=True,
-                )
-
-            st.divider()
-            st.markdown("#### Reset Registrations")
-            st.caption("Deletes every registration and signature so the list looks like no one has registered. The Fellows directory is not touched.")
-            st.checkbox("I understand this cannot be undone", key="confirm_reset")
-            st.button("Reset All Registrations", use_container_width=True, on_click=reset_all_registrations)
-            if st.session_state.pop("reset_done", False):
-                st.success("All registrations cleared.")
-            if st.session_state.pop("reset_blocked", False):
-                st.warning("Tick the confirmation box first.")
+fellows_rows = fetch_fellows()
 
 
 # ==============================================================================
