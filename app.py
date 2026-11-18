@@ -13,6 +13,12 @@ from typing import List, Optional, Tuple
 import numpy as np
 import pandas as pd
 import streamlit as st
+from docx import Document
+from docx.enum.table import WD_TABLE_ALIGNMENT, WD_CELL_VERTICAL_ALIGNMENT
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.oxml import OxmlElement
+from docx.oxml.ns import qn
+from docx.shared import Inches, Pt, RGBColor
 from PIL import Image, ImageDraw
 from streamlit_drawable_canvas import st_canvas
 
@@ -421,6 +427,59 @@ def extract_signature_png(canvas_result) -> Optional[bytes]:
     return _rasterize_fabric_paths(json_objects)
 
 
+def _shade_cell(cell, hex_fill: str) -> None:
+    tc_pr = cell._tc.get_or_add_tcPr()
+    shd = OxmlElement("w:shd")
+    shd.set(qn("w:val"), "clear")
+    shd.set(qn("w:color"), "auto")
+    shd.set(qn("w:fill"), hex_fill)
+    tc_pr.append(shd)
+
+
+def build_word_list(records: List[dict]) -> bytes:
+    """Word document: table with Fellow Name | Staff ID Number | Electronic Signature."""
+    doc = Document()
+    title = doc.add_paragraph()
+    title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    run = title.add_run("REPUBLIC HALL - FELLOW WELFARE")
+    run.bold = True
+    run.font.size = Pt(16)
+    run.font.color.rgb = RGBColor(0x0B, 0x1F, 0x3A)
+
+    table = doc.add_table(rows=1, cols=3)
+    table.style = "Table Grid"
+    table.alignment = WD_TABLE_ALIGNMENT.CENTER
+    widths = [Inches(2.6), Inches(1.7), Inches(2.2)]
+
+    for idx, label in enumerate(["Fellow Name", "Staff ID Number", "Electronic Signature"]):
+        cell = table.rows[0].cells[idx]
+        cell.width = widths[idx]
+        _shade_cell(cell, "0B1F3A")
+        para = cell.paragraphs[0]
+        para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        r = para.add_run(label)
+        r.bold = True
+        r.font.color.rgb = RGBColor(0xFF, 0xFF, 0xFF)
+
+    for row in sorted(records, key=lambda r: r["id"]):
+        cells = table.add_row().cells
+        for idx in range(3):
+            cells[idx].width = widths[idx]
+            cells[idx].vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
+        cells[0].paragraphs[0].add_run(str(row["full_name"]))
+        cells[1].paragraphs[0].add_run(str(row["staff_id"]))
+        sig_para = cells[2].paragraphs[0]
+        sig_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        try:
+            sig_para.add_run().add_picture(io.BytesIO(row["signature_image"]), width=Inches(1.7))
+        except Exception:
+            sig_para.add_run("(signature unavailable)")
+
+    buf = io.BytesIO()
+    doc.save(buf)
+    return buf.getvalue()
+
+
 def build_backup_zip(records: List[dict]) -> bytes:
     zip_buf = io.BytesIO()
     df_rows = []
@@ -612,7 +671,7 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-tab_verify, tab_list = st.tabs(["Welfare Approval", "See Current List"])
+tab_verify, tab_list = st.tabs(["Fellow Agreement", "See Current List"])
 
 
 # ==============================================================================
@@ -723,8 +782,8 @@ with tab_list:
 
     st.download_button(
         label="Download List",
-        data=list_df.to_csv(index=False).encode("utf-8"),
-        file_name="republic_hall_current_list.csv",
-        mime="text/csv",
+        data=build_word_list(fetch_submissions()),
+        file_name="republic_hall_fellows_list.docx",
+        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         use_container_width=True,
     )
