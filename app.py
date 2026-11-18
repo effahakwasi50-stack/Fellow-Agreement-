@@ -671,7 +671,7 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-tab_verify, tab_list = st.tabs(["Fellow Agreement", "See Current List"])
+tab_verify, tab_list = st.tabs(["Welfare Approval", "See Current List"])
 
 
 # ==============================================================================
