@@ -1,5 +1,6 @@
 streamlit
 streamlit-drawable-canvas
 pandas
+numpy
 pillow
-fpdf2
+python-docx
