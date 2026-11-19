@@ -663,7 +663,7 @@ st.markdown(
     <div class="rh-banner" style="display:flex; align-items:center; gap:1.25rem;">
         {logo_html}
         <div>
-            <div class="rh-kicker">Republic Hall • Office of the Hall Tutor</div>
+            <div class="rh-kicker">Republic Hall</div>
             <h1 class="rh-title">Fellow Welfare</h1>
         </div>
     </div>
