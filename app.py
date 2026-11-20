@@ -664,7 +664,7 @@ st.markdown(
         {logo_html}
         <div>
             <div class="rh-kicker">Republic Hall</div>
-            <h1 class="rh-title">Fellow Welfare</h1>
+            <h1 class="rh-title">Fellows Welfare</h1>
         </div>
     </div>
     """,
