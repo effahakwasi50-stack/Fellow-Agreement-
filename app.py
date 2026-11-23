@@ -2,6 +2,7 @@ import base64
 import csv
 import html
 import inspect
+import json
 import io
 import os
 import re
@@ -12,6 +13,7 @@ from typing import List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
+import requests
 import streamlit as st
 from docx import Document
 from docx.enum.table import WD_TABLE_ALIGNMENT, WD_CELL_VERTICAL_ALIGNMENT
@@ -25,7 +27,20 @@ from streamlit_drawable_canvas import st_canvas
 # ==============================================================================
 # Configuration Constants
 # ==============================================================================
-ADMIN_PIN = os.environ.get("ADMIN_PIN", "1234")
+
+
+def _secret(name: str, default: str = "") -> str:
+    """Read from Streamlit secrets, falling back to environment variables."""
+    try:
+        return str(st.secrets[name]).strip()
+    except Exception:
+        return os.environ.get(name, default).strip()
+
+
+# Google Sheets backend (via the Apps Script web app). If APPS_SCRIPT_URL is empty,
+# the app falls back to the local SQLite file (which Streamlit may wipe on restart).
+SHEETS_URL = _secret("APPS_SCRIPT_URL")
+SHEETS_PIN = _secret("APPS_SCRIPT_PIN")
 DB_PATH = "republic_hall_records.db"
 LOGO_CANDIDATES = [
     "public/assets/aistudio/logo.jpg_982440ba.png",
@@ -264,7 +279,7 @@ def update_fellows_from_list(names: List[str], replace_existing: bool) -> int:
     return inserted
 
 
-def save_submission(full_name: str, staff_id: str, signature_png: bytes, timestamp: str) -> int:
+def _db_save_submission(full_name: str, staff_id: str, signature_png: bytes, timestamp: str) -> int:
     with get_connection() as conn:
         cur = conn.execute(
             """
@@ -291,7 +306,7 @@ def reset_submissions() -> None:
         conn.commit()
 
 
-def fetch_registered_list() -> List[dict]:
+def _db_fetch_registered_list() -> List[dict]:
     """Public list: name + time only (no Staff ID, no signature)."""
     with get_connection() as conn:
         rows = conn.execute(
@@ -300,7 +315,7 @@ def fetch_registered_list() -> List[dict]:
     return [dict(r) for r in rows]
 
 
-def fetch_submissions() -> List[dict]:
+def _db_fetch_submissions() -> List[dict]:
     with get_connection() as conn:
         rows = conn.execute(
             """
@@ -310,6 +325,103 @@ def fetch_submissions() -> List[dict]:
             """
         ).fetchall()
     return [dict(r) for r in rows]
+
+
+# ------------------------------------------------------------------------------
+# Google Sheets storage (permanent) - used when APPS_SCRIPT_URL is configured
+# ------------------------------------------------------------------------------
+def _sheets_get(params: dict) -> dict:
+    resp = requests.get(SHEETS_URL, params=params, timeout=30)
+    resp.raise_for_status()
+    data = resp.json()
+    if not data.get("ok"):
+        raise RuntimeError(str(data.get("error", "server error")))
+    return data
+
+
+def _sheets_post(payload: dict) -> dict:
+    resp = requests.post(
+        SHEETS_URL,
+        data=json.dumps(payload),
+        headers={"Content-Type": "text/plain;charset=utf-8"},
+        timeout=30,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    if not data.get("ok"):
+        raise RuntimeError(str(data.get("error", "server error")))
+    return data
+
+
+def _shrink_signature_b64(png_bytes: bytes, limit: int = 40000) -> str:
+    """Return the signature as a base64 data URL that fits in one Google Sheets cell."""
+    img = Image.open(io.BytesIO(png_bytes)).convert("RGB")
+    scale = 1.0
+    while True:
+        work = img if scale == 1.0 else img.resize(
+            (max(int(img.width * scale), 60), max(int(img.height * scale), 20))
+        )
+        buf = io.BytesIO()
+        work.quantize(colors=16).save(buf, format="PNG", optimize=True)
+        encoded = base64.b64encode(buf.getvalue()).decode("ascii")
+        if len(encoded) <= limit or scale < 0.3:
+            return "data:image/png;base64," + encoded
+        scale *= 0.8
+
+
+@st.cache_data(ttl=15, show_spinner=False)
+def _remote_list() -> List[dict]:
+    rows = _sheets_get({"action": "list"})["rows"]
+    return [
+        {"id": i, "full_name": str(r.get("name", "")), "timestamp": str(r.get("timestamp", ""))}
+        for i, r in enumerate(rows, start=1)
+    ]
+
+
+def save_submission(full_name: str, staff_id: str, signature_png: bytes, timestamp: str) -> int:
+    if SHEETS_URL:
+        _sheets_post(
+            {
+                "action": "submit",
+                "name": full_name,
+                "staffId": staff_id,
+                "timestamp": timestamp,
+                "signature": _shrink_signature_b64(signature_png),
+            }
+        )
+        _remote_list.clear()
+        return 0
+    return _db_save_submission(full_name, staff_id, signature_png, timestamp)
+
+
+def fetch_registered_list() -> List[dict]:
+    if SHEETS_URL:
+        return _remote_list()
+    return _db_fetch_registered_list()
+
+
+def fetch_submissions() -> List[dict]:
+    if not SHEETS_URL:
+        return _db_fetch_submissions()
+    rows = _sheets_get({"action": "full", "pin": SHEETS_PIN})["rows"]
+    out: List[dict] = []
+    for i, r in enumerate(rows, start=1):
+        sig = str(r.get("signature", ""))
+        b64 = sig.split(",", 1)[1] if "," in sig else sig
+        try:
+            png = base64.b64decode(b64)
+        except Exception:
+            png = b""
+        out.append(
+            {
+                "id": i,
+                "full_name": str(r.get("name", "")),
+                "staff_id": str(r.get("staffId", "")),
+                "signature_image": png,
+                "timestamp": str(r.get("timestamp", "")),
+            }
+        )
+    return out
 
 
 # ==============================================================================
@@ -664,7 +776,7 @@ st.markdown(
         {logo_html}
         <div>
             <div class="rh-kicker">Republic Hall</div>
-            <h1 class="rh-title">Fellows Welfare</h1>
+            <h1 class="rh-title">Fellow Welfare</h1>
         </div>
     </div>
     """,
@@ -751,7 +863,11 @@ with tab_verify:
                     st.error("Please draw your signature on the signature pad before confirming.")
                 else:
                     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    record_id = save_submission(selected_fellow, staff_id.strip(), sig_png, now_str)
+                    try:
+                        record_id = save_submission(selected_fellow, staff_id.strip(), sig_png, now_str)
+                    except Exception:
+                        st.error("Could not save your registration. Please check your connection and press Confirm & Submit again.")
+                        st.stop()
                     st.session_state.last_submission = {
                         "record_id": record_id,
                         "full_name": selected_fellow,
@@ -762,10 +878,22 @@ with tab_verify:
 # ==============================================================================
 # Tab 2: Public "See Current List" (no PIN)
 # ==============================================================================
-with tab_list:
-    st.markdown("### Current List")
-    registered = fetch_registered_list()
-    st.metric("Fellows who have completed the agreement", f"{len(registered)} of {len(fellows_rows)}")
+@st.cache_data(show_spinner=False)
+def cached_word_list(version: tuple) -> bytes:
+    """Rebuild the Word file only when the registrations have actually changed."""
+    return build_word_list(fetch_submissions())
+
+
+@st.fragment(run_every=10)
+def show_current_list() -> None:
+    """Re-runs by itself every 10 seconds so new registrations appear without a reload."""
+    try:
+        registered = fetch_registered_list()
+    except Exception:
+        st.warning("Could not load the list right now. It will retry automatically.")
+        return
+    total_fellows = len(fetch_fellows())
+    st.metric("Fellows who have completed the agreement", f"{len(registered)} of {total_fellows}")
 
     list_df = pd.DataFrame(
         [
@@ -780,10 +908,25 @@ with tab_list:
     else:
         st.info("No one has registered yet.")
 
+    version = (
+        len(registered),
+        registered[-1]["id"] if registered else 0,
+        registered[-1]["timestamp"] if registered else "",
+    )
+    try:
+        word_bytes = cached_word_list(version)
+    except Exception:
+        st.warning("The Word file could not be prepared right now. It will retry automatically.")
+        return
     st.download_button(
         label="Download List",
-        data=build_word_list(fetch_submissions()),
+        data=word_bytes,
         file_name="republic_hall_fellows_list.docx",
         mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         use_container_width=True,
     )
+
+
+with tab_list:
+    st.markdown("### Current List")
+    show_current_list()
