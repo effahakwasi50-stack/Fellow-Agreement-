@@ -167,6 +167,7 @@ FELLOWS_SEED: List[str] = [
     "Dr. Prince Odame",
     "Dr. Samuel Boahen",
     "Mr. Albert Buondau",
+    "Dr (Mrs) Olivia Christos",
 ]
 
 
@@ -200,12 +201,12 @@ def init_db() -> None:
             )
             """
         )
-        count = conn.execute("SELECT COUNT(*) FROM fellows_directory").fetchone()[0]
-        if count == 0:
-            conn.executemany(
-                "INSERT OR IGNORE INTO fellows_directory (full_name) VALUES (?)",
-                [(name,) for name in FELLOWS_SEED],
-            )
+        # Always make sure every name in FELLOWS_SEED is in the directory,
+        # so names added to the list in the code show up after the next restart.
+        conn.executemany(
+            "INSERT OR IGNORE INTO fellows_directory (full_name) VALUES (?)",
+            [(name,) for name in FELLOWS_SEED],
+        )
         conn.commit()
 
 
