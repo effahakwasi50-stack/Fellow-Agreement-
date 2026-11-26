@@ -395,10 +395,28 @@ def save_submission(full_name: str, staff_id: str, signature_png: bytes, timesta
     return _db_save_submission(full_name, staff_id, signature_png, timestamp)
 
 
+def dedupe_latest(records: List[dict]) -> List[dict]:
+    """One entry per Fellow: if someone registered more than once, keep their latest registration."""
+    latest: dict = {}
+    for r in records:
+        latest[r["full_name"]] = r
+    return sorted(latest.values(), key=lambda r: r["id"])
+
+
 def fetch_registered_list() -> List[dict]:
     if SHEETS_URL:
-        return _remote_list()
-    return _db_fetch_registered_list()
+        return dedupe_latest(_remote_list())
+    return dedupe_latest(_db_fetch_registered_list())
+
+
+def is_already_registered(name: str) -> bool:
+    """Fresh (uncached) check used right before saving, to block duplicates."""
+    try:
+        if SHEETS_URL:
+            _remote_list.clear()
+        return name in {r["full_name"] for r in fetch_registered_list()}
+    except Exception:
+        return False
 
 
 def fetch_submissions() -> List[dict]:
@@ -574,7 +592,7 @@ def build_word_list(records: List[dict]) -> bytes:
         r.bold = True
         r.font.color.rgb = RGBColor(0xFF, 0xFF, 0xFF)
 
-    for row in sorted(records, key=lambda r: r["id"]):
+    for row in dedupe_latest(sorted(records, key=lambda r: r["id"])):
         cells = table.add_row().cells
         for idx in range(3):
             cells[idx].width = widths[idx]
@@ -821,7 +839,19 @@ with tab_verify:
         staff_id = ""
         canvas_result = None
 
+        already_done = False
         if selected_fellow:
+            try:
+                already_done = selected_fellow in {r["full_name"] for r in fetch_registered_list()}
+            except Exception:
+                already_done = False
+            if already_done:
+                st.warning(
+                    f"{selected_fellow} has already completed the registration. "
+                    "There is no need to register again."
+                )
+
+        if selected_fellow and not already_done:
             st.markdown("#### Step 2: Staff ID Number")
             staff_id = st.text_input(
                 "Staff ID Number",
@@ -829,7 +859,7 @@ with tab_verify:
                 key="staff_id_input",
             )
 
-        if selected_fellow and staff_id.strip():
+        if selected_fellow and not already_done and staff_id.strip():
             st.markdown("#### Step 3: Electronic Signature Pad")
             st.caption("Sign inside the white pad below using touch, mouse, or trackpad.")
 
@@ -862,6 +892,11 @@ with tab_verify:
                     st.error("Please enter your Staff ID Number in Step 2.")
                 elif sig_png is None:
                     st.error("Please draw your signature on the signature pad before confirming.")
+                elif is_already_registered(selected_fellow):
+                    st.warning(
+                        f"{selected_fellow} has already completed the registration. "
+                        "There is no need to register again."
+                    )
                 else:
                     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                     try:
